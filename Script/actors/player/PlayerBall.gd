@@ -25,6 +25,15 @@ signal player_died()
 @export var combo_max_bounces: int = 4       # 最大反弹容忍次数
 @export var combo_speed_bonus: float = 250.0  # 每次连击成功，速度上限增加值
 @export var combo_energy_bonus: float = 12.0 # 每次连击成功，额外能量奖励
+@export_group("Aim Arrow")
+@export var arrow_max_distance: float = 120.0  # 箭头离玩家的最远距离
+@export var arrow_max_scale: float = 1.0      # 箭头的最大缩放比例
+@export var arrow_dash_distance: float = 300.0 # 发射时，残影箭头前冲的距离
+@export var arrow_dash_time: float = 0.3       # 箭头前冲并消散的时间
+@export_group("Burst Speed")
+@export var burst_multiplier: float = 2.0      # 爆发初始速度的倍率 (比如设为2，就是起步速度翻倍)
+@export var burst_damp: float = 1.3           # 爆发时的“刹车阻力”，值越大，衰减到正常速度越快
+@export var burst_duration: float = 0.2        # 爆发感持续时间 (与阻力恢复到0的时间挂钩)
 @export_group("Aiming Camera Zoom")
 @export var aim_zoom_x: float = 1.062  # 瞄准时，水平方向(左右)的拉伸放大倍数
 @export var aim_zoom_y: float = 1.049  # 瞄准时，垂直方向(上下)的拉伸放大倍数
@@ -37,6 +46,7 @@ signal player_died()
 @onready var death_audio_player: AudioStreamPlayer = $DeathAudioPlayer
 @onready var visual_sprite: Sprite2D = $Sprite2D
 @onready var trail_node: Line2D = $TrailwithLine2D
+@onready var aim_arrow: Sprite2D = $AimArrow
 @onready var slow_mo_audio: AudioStreamPlayer = $SlowMoAudioPlayer
 @onready var launch_audio: AudioStreamPlayer = $LaunchAudioPlayer
 @onready var cancel_audio: AudioStreamPlayer = $CancelAudioPlayer
@@ -153,6 +163,62 @@ func _input(event: InputEvent) -> void:
 					set_collision_mask_value(2, false)
 				else:
 					set_collision_mask_value(2, true)
+				
+				# --- 如果能量足够，则执行发射 ---
+				if is_instance_valid(launch_audio):
+					launch_audio.play()
+				
+				_update_energy(current_energy - 100.0)
+
+				var final_launch_dir = -world_direction_vector
+				# -------------------------------------------------------------
+				# --- 【核心修改】爆发速度与平滑刹车 ---
+				# -------------------------------------------------------------
+				# 1. 赋予极高的初始速度 (基础速度 × 爆发倍率)
+				linear_velocity = final_launch_dir * (launch_magnitude * burst_multiplier)
+				
+				# 2. 赋予极高的空气阻力 (Linear Damp)
+				linear_damp = burst_damp
+				
+				# 3. 使用 Tween 将阻力平滑降回 0 (或您的默认值)
+				# 这样就完美模拟了一开始极快，然后顺滑回落到正常速度的推背感！
+				var damp_tween = create_tween()
+				damp_tween.tween_property(self, "linear_damp", 0.0, burst_duration).set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_IN_OUT)
+
+				# -------------------------------------------------------------
+				# --- 【新增】箭头前冲脱离残影 ---
+				# -------------------------------------------------------------
+				if aim_arrow.visible:
+					# 神级操作：直接克隆一个箭头！
+					var arrow_ghost = aim_arrow.duplicate()
+					# 把克隆的残影添加到世界里，这样它就不会跟着玩家球跑了
+					get_parent().add_child(arrow_ghost)
+					
+					# 对齐世界坐标
+					arrow_ghost.global_position = aim_arrow.global_position
+					arrow_ghost.global_rotation = aim_arrow.global_rotation
+					
+					# 隐藏玩家身上的本体箭头
+					aim_arrow.hide()
+					
+					# 用 Tween 给残影做【前冲+渐隐】动画
+					var ghost_tween = create_tween().set_parallel(true)
+					ghost_tween.set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT)
+					
+					# a) 顺着发射方向前冲
+					var dash_target_pos = arrow_ghost.global_position + final_launch_dir * arrow_dash_distance
+					ghost_tween.tween_property(arrow_ghost, "global_position", dash_target_pos, arrow_dash_time)
+					# b) 彻底变透明
+					ghost_tween.tween_property(arrow_ghost, "modulate:a", 0.0, arrow_dash_time)
+					# c) 动画结束时销毁残影垃圾
+					ghost_tween.chain().tween_callback(arrow_ghost.queue_free)
+
+				# -------------------------------------------------------------
+				# (后续的关闭碰撞蒙版穿透敌人的逻辑保持不变)
+				if linear_velocity.length_squared() > kill_threshold * kill_threshold:
+					set_collision_mask_value(2, false)
+				else:
+					set_collision_mask_value(2, true)
 
 
 
@@ -177,34 +243,60 @@ func tween_camera_zoom(target_zoom: Vector2, duration: float = 0.2):
 
 func _process(delta: float) -> void:
 	if is_aiming:
+		# ==========================================
+		# 1. 画瞄准线
+		# ==========================================
 		var mouse_world_pos = get_global_mouse_position()
 		var local_mouse_pos = to_local(mouse_world_pos)
-		
 		line_2d.set_point_position(1, local_mouse_pos)
-		# 【新增】持续消耗能量
+		
+		# ==========================================
+		# 2. 持续消耗能量与耗尽判断
+		# ==========================================
 		var energy_before_drain = current_energy
-		#    用我们之前创建的 _update_energy 函数，来安全地减少能量
-		#    消耗的量 = 每秒消耗量 * 这一帧所经过的时间(delta)
 		_update_energy(current_energy - (energy_drain_per_second * delta))
-		# 【新增】检查能量是否耗尽
+		
 		if current_energy <= 0:
 			print("能量耗尽，强制退出子弹时间！")
-			
-			# 触发成就：你的能量好像不够了哦~
-			SteamManager.unlock_achievement("ACH_MISC_ENERGY_EMPTY")
-			
-			# 我们可以创建一个新的函数来处理“取消瞄准”的逻辑，避免代码重复
+			# 触发成就
+			if ClassDB.class_exists("SteamManager") or has_node("/root/SteamManager"):
+				SteamManager.unlock_achievement("ACH_MISC_ENERGY_EMPTY")
 			_cancel_aiming()
-			return
+			return # 提前结束，不执行后面的逻辑了
 			
-		# --- 4. 【核心修正】在这里，每一帧都检查能量并更新颜色 ---
-		# 判断当前能量是否低于“发射阈值”(100)
+		# ==========================================
+		# 3. 瞄准线颜色预警
+		# ==========================================
 		if current_energy < 100.0:
-			# 如果是，就将颜色 Tween 到“低能量”状态
 			_tween_line_color(line_color_low_energy)
 		else:
-			# 否则，就将颜色 Tween 到“正常”状态
 			_tween_line_color(line_color_normal)
+			
+		# ==========================================
+		# 4. 动态箭头逻辑
+		# ==========================================
+		var screen_drag_vector = get_viewport().get_mouse_position() - drag_start_position_screen
+		var current_pull_distance = screen_drag_vector.length()
+		var drag_ratio = clamp(current_pull_distance / 300.0, 0.0, 1.0)
+		
+		if drag_ratio > 0.05:
+			aim_arrow.show()
+			var actual_launch_dir = (global_position - mouse_world_pos).normalized()
+			aim_arrow.global_rotation = actual_launch_dir.angle()
+			aim_arrow.global_position = global_position + actual_launch_dir * (arrow_max_distance * drag_ratio)
+			
+			var current_scale = arrow_max_scale * drag_ratio
+			aim_arrow.scale = Vector2(current_scale, current_scale)
+			aim_arrow.modulate.a = drag_ratio
+		else:
+			aim_arrow.hide()
+			
+	else:
+		# ==========================================
+		# 5. 【没有在瞄准时】的兜底隐藏
+		# ==========================================
+		if is_instance_valid(aim_arrow):
+			aim_arrow.hide()
 
 
 
@@ -238,6 +330,7 @@ func _cancel_aiming():
 	if has_method("tween_camera_zoom"):
 		tween_camera_zoom(Vector2(1.0, 1.0), 0.2)
 	fade_radial_blur(false) # 取消时也要恢复清晰
+	aim_arrow.hide() # 【新增】取消瞄准时隐藏箭头
 
 
 

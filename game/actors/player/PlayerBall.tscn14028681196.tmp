@@ -11,7 +11,7 @@
 [ext_resource type="AudioStream" uid="uid://b5xdyakhov6he" path="res://assets/Audio/Sound Effects/CancelAim.wav" id="8_8oxga"]
 
 [sub_resource type="PhysicsMaterial" id="PhysicsMaterial_46ku3"]
-bounce = 0.7
+bounce = 0.61
 
 [sub_resource type="Gradient" id="Gradient_8oxga"]
 interpolation_color_space = 2
@@ -66,7 +66,6 @@ scale = Vector2(0.843168, 0.843168)
 texture = ExtResource("3_pfcfs")
 
 [node name="AimArrow" type="Sprite2D" parent="." unique_id=546691626]
-visible = false
 texture = ExtResource("5_wo626")
 
 [node name="CollisionShape2D" type="CollisionShape2D" parent="." unique_id=1501115901]
